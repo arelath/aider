@@ -13,7 +13,6 @@ import sys
 import threading
 import time
 import traceback
-import webbrowser
 from collections import defaultdict
 from datetime import datetime
 from json.decoder import JSONDecodeError
@@ -23,6 +22,7 @@ from typing import List
 from aider import __version__, models, prompts, urls, utils
 from aider.analytics import Analytics
 from aider.commands import Commands
+from aider.exceptions import LiteLLMExceptions
 from aider.history import ChatSummary
 from aider.io import ConfirmGroup, InputOutput
 from aider.linter import Linter
@@ -30,7 +30,7 @@ from aider.llm import litellm
 from aider.repo import ANY_GIT_ERROR, GitRepo
 from aider.repomap import RepoMap
 from aider.run_cmd import run_cmd
-from aider.sendchat import RETRY_TIMEOUT, retry_exceptions, send_completion
+from aider.sendchat import RETRY_TIMEOUT, send_completion
 from aider.utils import format_content, format_messages, format_tokens, is_image_file
 
 from ..dump import dump  # noqa: F401
@@ -355,6 +355,9 @@ class Coder:
 
         for fname in fnames:
             fname = Path(fname)
+            if self.repo and self.repo.git_ignored_file(fname):
+                self.io.tool_warning(f"Skipping {fname} that matches gitignore spec.")
+
             if self.repo and self.repo.ignored_file(fname):
                 self.io.tool_warning(f"Skipping {fname} that matches aiderignore spec.")
                 continue
@@ -790,34 +793,9 @@ class Coder:
             self.num_reflections += 1
             message = self.reflected_message
 
-    def check_and_open_urls(self, exc: Exception) -> List[str]:
-        import openai
-
+    def check_and_open_urls(self, exc, friendly_msg=None):
         """Check exception for URLs, offer to open in a browser, with user-friendly error msgs."""
         text = str(exc)
-        friendly_msg = None
-
-        if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError)):
-            friendly_msg = (
-                "There is a problem connecting to the API provider. Please try again later or check"
-                " your model settings."
-            )
-        elif isinstance(exc, openai.RateLimitError):
-            friendly_msg = (
-                "The API provider's rate limits have been exceeded. Check with your provider or"
-                " wait awhile and retry."
-            )
-        elif isinstance(exc, openai.InternalServerError):
-            friendly_msg = (
-                "The API provider seems to be down or overloaded. Please try again later."
-            )
-        elif isinstance(exc, openai.BadRequestError):
-            friendly_msg = "The API provider refused the request as invalid?"
-        elif isinstance(exc, openai.AuthenticationError):
-            friendly_msg = (
-                "The API provider refused your authentication. Please check that you are using a"
-                " valid API key."
-            )
 
         if friendly_msg:
             self.io.tool_warning(text)
@@ -829,8 +807,7 @@ class Coder:
         urls = list(set(url_pattern.findall(text)))  # Use set to remove duplicates
         for url in urls:
             url = url.rstrip(".',\"")
-            if self.io.confirm_ask("Open URL for more info about this error?", subject=url):
-                webbrowser.open(url)
+            self.io.offer_url(url)
         return urls
 
     def check_for_urls(self, inp: str) -> List[str]:
@@ -846,7 +823,7 @@ class Coder:
                     "Add URL to the chat?", subject=url, group=group, allow_never=True
                 ):
                     inp += "\n\n"
-                    inp += self.commands.cmd_web(url)
+                    inp += self.commands.cmd_web(url, return_content=True)
                     added_urls.append(url)
                 else:
                     self.rejected_urls.add(url)
@@ -982,12 +959,18 @@ class Coder:
                 platform=platform_text
             )
 
+        if self.chat_language:
+            language = self.chat_language
+        else:
+            language = "the same language they are using"
+
         prompt = prompt.format(
             fence=self.fence,
             lazy_prompt=lazy_prompt,
             platform=platform_text,
             shell_cmd_prompt=shell_cmd_prompt,
             shell_cmd_reminder=shell_cmd_reminder,
+            language=language,
         )
         return prompt
 
@@ -1154,8 +1137,6 @@ class Coder:
         return chunks
 
     def send_message(self, inp):
-        import openai  # for error codes below
-
         self.cur_messages += [
             dict(role="user", content=inp),
         ]
@@ -1175,6 +1156,8 @@ class Coder:
 
         retry_delay = 0.125
 
+        litellm_ex = LiteLLMExceptions()
+
         self.usage_report = None
         exhausted = False
         interrupted = False
@@ -1183,30 +1166,37 @@ class Coder:
                 try:
                     yield from self.send(messages, functions=self.functions)
                     break
-                except retry_exceptions() as err:
-                    # Print the error and its base classes
-                    # for cls in err.__class__.__mro__: dump(cls.__name__)
+                except litellm_ex.exceptions_tuple() as err:
+                    ex_info = litellm_ex.get_ex_info(err)
 
-                    retry_delay *= 2
-                    if retry_delay > RETRY_TIMEOUT:
-                        self.mdstream = None
-                        self.check_and_open_urls(err)
+                    if ex_info.name == "ContextWindowExceededError":
+                        exhausted = True
                         break
+
+                    should_retry = ex_info.retry
+                    if should_retry:
+                        retry_delay *= 2
+                        if retry_delay > RETRY_TIMEOUT:
+                            should_retry = False
+
+                    if not should_retry:
+                        self.mdstream = None
+                        self.check_and_open_urls(err, ex_info.description)
+                        break
+
                     err_msg = str(err)
-                    self.io.tool_error(err_msg)
+                    if ex_info.description:
+                        self.io.tool_warning(err_msg)
+                        self.io.tool_error(ex_info.description)
+                    else:
+                        self.io.tool_error(err_msg)
+
                     self.io.tool_output(f"Retrying in {retry_delay:.1f} seconds...")
                     time.sleep(retry_delay)
                     continue
                 except KeyboardInterrupt:
                     interrupted = True
                     break
-                except litellm.ContextWindowExceededError:
-                    # The input is overflowing the context window!
-                    exhausted = True
-                    break
-                except litellm.exceptions.BadRequestError as br_err:
-                    self.io.tool_error(f"BadRequestError: {br_err}")
-                    return
                 except FinishReasonLength:
                     # We hit the output limit!
                     if not self.main_model.info.get("supports_assistant_prefill"):
@@ -1221,12 +1211,8 @@ class Coder:
                         messages.append(
                             dict(role="assistant", content=self.multi_response_content, prefix=True)
                         )
-                except (openai.APIError, openai.APIStatusError) as err:
-                    # for cls in err.__class__.__mro__: dump(cls.__name__)
-                    self.mdstream = None
-                    self.check_and_open_urls(err)
-                    break
                 except Exception as err:
+                    self.mdstream = None
                     lines = traceback.format_exception(type(err), err, err.__traceback__)
                     self.io.tool_warning("".join(lines))
                     self.io.tool_error(str(err))
@@ -1259,10 +1245,19 @@ class Coder:
         else:
             content = ""
 
-        try:
-            self.reply_completed()
-        except KeyboardInterrupt:
-            interrupted = True
+        if not interrupted:
+            add_rel_files_message = self.check_for_file_mentions(content)
+            if add_rel_files_message:
+                if self.reflected_message:
+                    self.reflected_message += "\n\n" + add_rel_files_message
+                else:
+                    self.reflected_message = add_rel_files_message
+                return
+
+            try:
+                self.reply_completed()
+            except KeyboardInterrupt:
+                interrupted = True
 
         if interrupted:
             content += "\n^C KeyboardInterrupt"
@@ -1312,13 +1307,6 @@ class Coder:
                     self.reflected_message = test_errors
                     self.update_cur_messages()
                     return
-
-        add_rel_files_message = self.check_for_file_mentions(content)
-        if add_rel_files_message:
-            if self.reflected_message:
-                self.reflected_message += "\n\n" + add_rel_files_message
-            else:
-                self.reflected_message = add_rel_files_message
 
     def reply_completed(self):
         pass
@@ -1374,11 +1362,9 @@ class Coder:
             res.append("- Use /clear to clear the chat history.")
             res.append("- Break your code into smaller source files.")
 
-        res.append("")
-        res.append(f"For more info: {urls.token_limits}")
-
         res = "".join([line + "\n" for line in res])
         self.io.tool_error(res)
+        self.io.offer_url(urls.token_limits)
 
     def lint_edited(self, fnames):
         res = ""
@@ -1622,7 +1608,6 @@ class Coder:
                 completion.usage, "cache_creation_input_tokens"
             ):
                 self.message_tokens_sent += prompt_tokens
-                self.message_tokens_sent += cache_hit_tokens
                 self.message_tokens_sent += cache_write_tokens
             else:
                 self.message_tokens_sent += prompt_tokens
@@ -1798,6 +1783,10 @@ class Coder:
         if full_path in self.abs_fnames:
             self.check_for_dirty_commit(path)
             return True
+
+        if self.repo and self.repo.git_ignored_file(path):
+            self.io.tool_warning(f"Skipping edits to {path} that matches gitignore spec.")
+            return
 
         if not Path(full_path).exists():
             if not self.io.confirm_ask("Create new file?", subject=path):
@@ -2072,9 +2061,10 @@ class Coder:
             if output:
                 accumulated_output += f"Output from {command}\n{output}\n"
 
-        if accumulated_output.strip() and not self.io.confirm_ask(
+        if accumulated_output.strip() and self.io.confirm_ask(
             "Add command output to the chat?", allow_never=True
         ):
-            accumulated_output = ""
-
-        return accumulated_output
+            num_lines = len(accumulated_output.strip().splitlines())
+            line_plural = "line" if num_lines == 1 else "lines"
+            self.io.tool_output(f"Added {num_lines} {line_plural} of output to the chat.")
+            return accumulated_output

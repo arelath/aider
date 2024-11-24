@@ -1068,8 +1068,10 @@ class TestCommands(TestCase):
             io.prompt_ask = lambda *args, **kwargs: "y"
 
             # Test the cmd_run method with a command that should not raise an error
-            result = commands.cmd_run("exit 1", add_on_nonzero_exit=True)
-            self.assertIn("I ran this command", result)
+            commands.cmd_run("exit 1", add_on_nonzero_exit=True)
+
+            # Check that the output was added to cur_messages
+            self.assertTrue(any("exit 1" in msg["content"] for msg in coder.cur_messages))
 
     def test_cmd_add_drop_untracked_files(self):
         with GitTemporaryDirectory():
@@ -1209,6 +1211,26 @@ class TestCommands(TestCase):
             del coder
             del commands
             del repo
+
+    def test_cmd_add_gitignored_file(self):
+        with GitTemporaryDirectory():
+            # Create a .gitignore file
+            gitignore = Path(".gitignore")
+            gitignore.write_text("*.ignored\n")
+
+            # Create a file that matches the gitignore pattern
+            ignored_file = Path("test.ignored")
+            ignored_file.write_text("This should be ignored")
+
+            io = InputOutput(pretty=False, fancy_input=False, yes=False)
+            coder = Coder.create(self.GPT35, None, io)
+            commands = Commands(io, coder)
+
+            # Try to add the ignored file
+            commands.cmd_add(str(ignored_file))
+
+            # Verify the file was not added
+            self.assertEqual(len(coder.abs_fnames), 0)
 
     def test_cmd_add_aiderignored_file(self):
         with GitTemporaryDirectory():

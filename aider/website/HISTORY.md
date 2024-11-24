@@ -10,6 +10,12 @@ description: Release notes and stats on aider writing its own code.
 
 {% include blame.md %}
 
+The above 
+[stats are based on the git commit history](/docs/faq.html#how-are-the-aider-wrote-xx-of-code-stats-computed)
+of the aider repo.
+
+## Release notes
+
 <!--[[[cog
 # This page is a copy of HISTORY.md, adding the front matter above.
 text = open("HISTORY.md").read()
@@ -18,6 +24,63 @@ cog.out(text)
 ]]]-->
 
 
+
+### Aider v0.64.0
+
+- Added [`/editor` command](https://aider.chat/docs/usage/commands.html) to open system editor for writing prompts, by @thehunmonkgroup.
+- Full support for `gpt-4o-2024-11-20`.
+- Stream o1 models by default.
+- `/run` and suggested shell commands are less mysterious and now confirm that they "Added XX lines of output to the chat."
+- Ask 1% of users if they want to opt-in to [analytics](https://aider.chat/docs/more/analytics.html).
+- Added support for [optional multiline input tags](https://aider.chat/docs/usage/commands.html#entering-multi-line-chat-messages) with matching closing tags.
+- Improved [model settings configuration](https://aider.chat/docs/config/adv-model-settings.html#global-extra-params) with support for global `extra_params` for `litellm.completion()`.
+- Architect mode now asks to add files suggested by the LLM.
+- Fixed bug in fuzzy model name matching.
+- Added Timeout exception to handle API provider timeouts.
+- Added `--show-release-notes` to control release notes display on first run of new version.
+- Save empty dict to cache file on model metadata download failure, to delay retry.
+- Improved error handling and code formatting.
+- Aider wrote 74% of the code in this release.
+
+###  Aider v0.63.2
+
+- Fixed bug in fuzzy model name matching when litellm provider info is missing.
+- Modified model metadata file loading to allow override of resource file.
+- Allow recursive loading of dirs using `--read`.
+- Updated dependency versions to pick up litellm fix for ollama models.
+- Added exponential backoff retry when writing files to handle editor file locks.
+- Updated Qwen 2.5 Coder 32B model configuration.
+
+### Aider v0.63.1
+
+- Fixed bug in git ignored file handling.
+- Improved error handling for git operations.
+
+### Aider v0.63.0
+
+- Support for Qwen 2.5 Coder 32B.
+- `/web` command just adds the page to the chat, without triggering an LLM response.
+- Improved prompting for the user's preferred chat language.
+- Improved handling of LiteLLM exceptions.
+- Bugfix for double-counting tokens when reporting cache stats.
+- Bugfix for the LLM creating new files.
+- Other small bug fixes.
+- Aider wrote 55% of the code in this release.
+
+### Aider v0.62.0
+
+- Full support for Claude 3.5 Haiku
+  - Scored 75% on [aider's code editing leaderboard](https://aider.chat/docs/leaderboards/).
+  - Almost as good as Sonnet at much lower cost.
+  - Launch with `--haiku` to use it.
+- Easily apply file edits from ChatGPT, Claude or other web apps
+  - Chat with ChatGPT or Claude via their web app. 
+  - Give it your source files and ask for the changes you want.
+  - Use the web app's "copy response" button to copy the entire reply from the LLM.
+  - Run `aider --apply-clipboard-edits file-to-edit.js`.
+  - Aider will edit your file with the LLM's changes.
+- Bugfix for creating new files.
+- Aider wrote 84% of the code in this release.  
 
 ### Aider v0.61.0
 
